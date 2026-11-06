@@ -1,0 +1,6 @@
+node_modules/
+.env
+.env.*
+!.env.example
+HANDOVER_FOR_AGENT.md
+*.log
