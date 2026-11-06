@@ -1,0 +1,13 @@
+{
+  "name": "zenn-articles",
+  "version": "1.0.0",
+  "description": "アフェルによるTomoriBotの開発記録と技術解説。",
+  "scripts": {
+    "preview": "zenn preview"
+  },
+  "author": "aph31",
+  "dependencies": {
+    "zenn-cli": "^0.5.14"
+  },
+  "private": true
+}
