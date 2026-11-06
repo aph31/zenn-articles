@@ -9,3 +9,8 @@
 記事は `articles/`、画像は今後 `images/` に配置します。
 現在の記事は技術監修待ちの下書きです。`published: false` を維持し、公開には人間の承認が必要です。
 公開リポジトリでは、Zennで未公開の記事もMarkdownを閲覧できます。
+
+## ローカルプレビュー
+
+Node.jsを用意し、初回は `npm ci`、続いて `npm run preview` を実行します。
+http://localhost:8000 で確認できます。
