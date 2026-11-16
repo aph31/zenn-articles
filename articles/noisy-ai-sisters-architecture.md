@@ -3,11 +3,8 @@ title: "騒がしいAI姉妹を1つのDiscord Botに住まわせる設計：Webh
 emoji: "🏠"
 type: "tech"
 topics: ["discord", "ai", "aiagent", "typescript", "個人開発"]
-published: false
+published: true
 ---
-
-<!-- DRAFT / 未公開 / 技術監修待ち。コード参照は 0e46459（2026-11-16 時点の main）に固定。 -->
-<!-- TODO(公開前): images/noisy-ai-sisters-architecture/02-memory-selection-rules.png は本文で使っていない。コミットしないか削除する。 -->
 
 ![1つのTomoriBotがPostgreSQLの人格設定と記憶を使い、複数のペルソナとしてDiscordに応答する全体図](/images/noisy-ai-sisters-architecture/01-multi-persona-overview.png)
 *TomoriBotの全体像。*
@@ -30,7 +27,7 @@ published: false
 
 最近のパーソナルAIエージェントでも、人格や長期記憶をカスタマイズできるものが増えています。
 
-たとえばMetaの[Muse](https://en.wikipedia.org/wiki/Muse_%28AI_agent%29)は、エージェントの名前や口調・性格を自分好みに設定でき、ユーザーについての長期記憶も保持します。オープンソースの[OpenClaw](https://github.com/openclaw/openclaw)でも、ディスク上の `SOUL.md` に人格や行動方針を書き、`USER.md` と `MEMORY.md` にユーザーの情報を保存する設計がよく知られています。
+たとえばMetaの[Muse](https://en.wikipedia.org/wiki/Muse_%28AI_agent%29)はエージェントの名前や口調・性格を自分好みに設定でき、ユーザーについての長期記憶も保持します。オープンソースの[OpenClaw](https://github.com/openclaw/openclaw)でも、ディスク上の `SOUL.md` に人格や行動方針を書き、`USER.md` と `MEMORY.md` にユーザーの情報を保存する設計がよく知られています。
 
 ただ、どちらも基本にあるのは「**1人のユーザーに、1体のエージェントが向き合う**」という前提です。
 
@@ -43,7 +40,7 @@ published: false
 一人暮らし用のワンルームに姉たちを押し込めば無理が出るのと同じで、この「1人1体」の仕組みを複数人が参加するDiscordやSlackのような共有チャットにそのまま持ち込むと、すぐに壁にぶつかります。
 
 - **`MEMORY.md` 1枚では記憶を分けられない**：OpenClawがグループチャットで `MEMORY.md` を読み込まない仕様にしているのも、個人の記憶がほかの参加者に漏れるのを防ぐためです。複数人が複数のキャラクターと話す場では、「誰についての記憶を、どの人格が持っているか」を最初から分けて保存する必要があります。
-- **役割ごとに別Botを立てると管理が殖える**：SlackのBotでもよくある話ですが、役割や人格を増やすたびに別々のApp登録とバックエンドのインスタンスを立てていると、管理もコストも人数分だけ膨らみます。実はDiscordのWebhookやSlackの `chat:write.customize` を使えば、1つのBotからメッセージごとに別々の名前とアイコンで発言すること自体は可能です。問題は、その裏で「いま誰が呼ばれていて、どの記憶を読むべきか」を1つのプロセスでどう切り替えるかです。
+- **役割ごとに別Botを立てると管理が殖える**：SlackのBotでもよくある話ですが、役割や人格を増やすたびに別々のApp登録とバックエンドのインスタンスを立てていると、管理もコストも人数分だけ膨らみます。実はDiscordのWebhookやSlackの `chat:write.customize` を使えば、1つのBotからメッセージごとに別々の名前とアイコンで発言すること自体は可能です。問題はその裏で「いま誰が呼ばれていて、どの記憶を読むべきか」を1つのプロセスでどう切り替えるかです。
 
 TomoriBotがやっているのは、その裏側の切り替えです。`SOUL.md` や `MEMORY.md` に相当するものをファイルではなくPostgreSQLのテーブルに分け、1つのBotプロセスで「名札の判別」「記憶のスコープ」「会話の連鎖止め」を処理しています。この3つの仕組み自体はTomoriBot専用ではなく、DiscordやSlackで複数の人格・役割を1つのエージェントに同居させたいときにもそのまま使える考え方です。
 
@@ -310,7 +307,7 @@ TomoriBotがやっているのは、その裏側の切り替えです。`SOUL.md
 
 ## 名札：Webhookの名前は誰でも名乗れる
 
-MainペルソナはBot本体のユーザーとして発言します。Alterペルソナは、チャンネルに作ったWebhookを通じて、人格ごとの名前とアバターで発言します。人数分のBotアカウントを用意する必要はありません。
+MainペルソナはBot本体のユーザーとして発言します。Alterペルソナはチャンネルに作ったWebhookを通じて、人格ごとの名前とアバターで発言します。人数分のBotアカウントを用意する必要はありません。
 
 問題は返信を受け取るときです。ユーザーがWebhookの発言に返信すると、その人格が会話を続けます。ところがWebhookメッセージの送信者名は、ただの文字列です。同じチャンネルに別のWebhookがあれば、誰でも「ヒカリ」を名乗って投稿できます。
 
@@ -344,7 +341,7 @@ export async function verifyMessageWebhook(message: Message): Promise<boolean> {
 
 ## 記憶：設定のIDと、記憶を引き継ぐID
 
-人格を分けても、全員が同じ長期記憶を読んでいたら意味がありません。TomoriBotの長期記憶には、ユーザーについての**個人記憶**と、サーバーについての**サーバー記憶**があります。ユーザーが手動で追加することも、設定で許可されていれば会話中にBotが保存することもできます。
+人格を分けても、全員が同じ長期記憶を読んでいたら意味がありません。TomoriBotの長期記憶にはユーザーについての**個人記憶**と、サーバーについての**サーバー記憶**があります。ユーザーが手動で追加することも、設定で許可されていれば会話中にBotが保存することもできます。
 
 記憶の関連付けには、人格の2種類のIDが使われています。
 
@@ -394,7 +391,7 @@ lineage `0` は「そのユーザーについて、全人格が知っていて�
 | ほかの人格の属性 | 会話に関わった人格の、公開設定（`is_public`）の属性だけが渡される |
 | 文書（RAG） | 人格への割り当てや共有設定、チャンネルの条件に従って検索される |
 
-公開属性の選択は [`buildPublicPersonaProfiles()`](https://github.com/Bredrumb/TomoriBot/blob/0e4645963c97d8f893ddfa0ced397658a2e526e7/src/utils/text/contextReferences.ts#L60) で確認できます。少なくとも、非公開の属性まで姉たちに筒抜けにならないだけは助かっています。なお、lineageはあくまで記憶を選ぶための識別子で、権限制御の代わりにはなりません。
+公開属性の選択は [`buildPublicPersonaProfiles()`](https://github.com/Bredrumb/TomoriBot/blob/0e4645963c97d8f893ddfa0ced397658a2e526e7/src/utils/text/contextReferences.ts#L60) で確認できます。少なくとも、非公開の属性まで姉たちに筒抜けにならないのだけは助かっています。なお、lineageはあくまで記憶を選ぶための識別子で、権限制御の代わりにはなりません。
 
 ## 連鎖：姉たちは放っておくと止まらない
 
@@ -447,7 +444,7 @@ if (isSelfMessage && cascadeLimit > 0) {
 
 最初は単純な自己返信の深さ（`self_reply_limit`）しか見ていなかったのですが、1メッセージでの複数人同時ヒットと人格同士の呼び合いが別計算になっていたため、後から現在の `cascade_limit` と `match_limit` に整理されました（[`cea1bb3`](https://github.com/Bredrumb/TomoriBot/commit/cea1bb308) / [`e93ab45`](https://github.com/Bredrumb/TomoriBot/commit/e93ab45983d6e5828e354a05374444e3401512e4)）。さらに自発会話（Natural Nudge）で人格が別の人格の名前を呼んで無限に巻き込む抜け道も見つかり、そこにも上限がかけられています（[`de7d2e3`](https://github.com/Bredrumb/TomoriBot/commit/de7d2e3f8)）。
 
-つまり既定では、ユーザーの一言で始まった最初の発動のあと、自動で続く発動は3回までです。Bot同士の雑談でDiscordやSlackの通知音が立て続けに鳴り響くのを想像すれば、0回でも構わない気はしますが。
+つまり既定ではユーザーの一言で始まった最初の発動のあと、自動で続く発動は3回までです。Bot同士の雑談でDiscordやSlackの通知音が立て続けに鳴り響くのを想像すれば、0回でも構わない気はしますが。
 
 ## トレードオフ：プロンプトは軽くなるが、キャッシュが割れやすい
 
