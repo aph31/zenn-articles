@@ -4,3 +4,5 @@ node_modules/
 !.env.example
 HANDOVER_FOR_AGENT.md
 *.log
+notes/
+AGENTS.md
