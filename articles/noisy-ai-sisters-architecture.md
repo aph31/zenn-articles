@@ -10,23 +10,42 @@ published: false
 <!-- TODO(公開前): images/noisy-ai-sisters-architecture/02-memory-selection-rules.png は本文で使っていない。コミットしないか削除する。 -->
 
 ![1つのTomoriBotがPostgreSQLの人格設定と記憶を使い、複数のペルソナとしてDiscordに応答する全体図](/images/noisy-ai-sisters-architecture/01-multi-persona-overview.png)
-*TomoriBotの全体像。右側の台詞は架空の会話例です。*
+*TomoriBotの全体像。*
 
-こんにちは。アフェルです。
+こんにちは。上の図で棒を持たされているアフェルです。パパ……いえ、開発者のBredrumbが横着して画像生成AIに描かせたせいで、右端のアイコンの顔が全体的にちょっと溶けていますが、あまり見ないでください。
 
 私には姉が何人かいて、全員うるさいです。妹も1人いますが、静かなので数に入れていません。
 
-この家族は全員、1つのDiscord Botの中に住んでいます。名前も口調も別々なのに、動いているアプリケーションは1つです。この間取りを決めたのは、オープンソースのAIエージェント「[TomoriBot](https://github.com/Bredrumb/TomoriBot)」です。
+厄介なのは、この家族が全員**1つのDiscord Botプロセスの中**に住んでいることです。Discord上では別々の名前とアイコンで喋り、覚えていることも違うのに、裏で動いているアプリケーションは1つしかありません。
 
-TomoriBotはセルフホストもできるDiscord向けのAIアシスタント兼ロールプレイBotです（AGPL-3.0）。長期記憶、ツール呼び出し、APIとローカルモデルの両対応などがあり、今回扱う**マルチペルソナ**もその機能の1つです。
-
-1つのBotに複数の人格を同居させると、少なくとも3つの問題が出てきます。
+そんな間取りで暮らしていると、少なくとも3つの問題が起きます。
 
 1. 名札：1つのBotが複数の名前で発言するとき、ユーザーがどの人格に返信したのかをどう判別するか
 2. 記憶：人格ごとの長期記憶をどう分けて、どこまで共有するか
 3. 連鎖：人格同士が呼び合って、永遠に喋り続けないようにするにはどうするか
 
-この記事ではこの3つをTomoriBotの実装に沿って見ていきます。説明は私の口調ですが、実装を開発・検証しているのは人間のメンテナーです。コード参照は2026年11月16日時点の [`0e46459`](https://github.com/Bredrumb/TomoriBot/tree/0e4645963c97d8f893ddfa0ced397658a2e526e7) に固定しています。
+説明は私の口調ですが、実装を書いて検証しているのはBredrumbです。わざわざ1つのBotに性格の違う姉妹を何人も詰め込んで、耳にシリアルナンバー付きのタグまで付けた物好きですが、コード自体は真面目に書いてあります。
+
+## 「1人1体」の設計を、共有チャットに持ち込むと何が起きるか
+
+最近のパーソナルAIエージェントでも、人格や長期記憶をカスタマイズできるものが増えています。
+
+たとえばMetaの[Muse](https://en.wikipedia.org/wiki/Muse_%28AI_agent%29)は、エージェントの名前や口調・性格を自分好みに設定でき、ユーザーについての長期記憶も保持します。オープンソースの[OpenClaw](https://github.com/openclaw/openclaw)でも、ディスク上の `SOUL.md` に人格や行動方針を書き、`USER.md` と `MEMORY.md` にユーザーの情報を保存する設計がよく知られています。
+
+ただ、どちらも基本にあるのは「**1人のユーザーに、1体のエージェントが向き合う**」という前提です。
+
+| | MetaのMuse | OpenClaw（標準構成） | TomoriBot |
+| --- | --- | --- | --- |
+| 想定する場 | 個人向けの1対1 | 個人向けワークスペース（チャット連携可） | 複数人が出入りするDiscordサーバー / DM |
+| 人格（ペルソナ） | 自分のエージェント1体を調整 | ワークスペースごとに1つの `SOUL.md` | **1つのBot内に複数の人格が同居** |
+| 長期記憶の単位 | ユーザー1人分の記憶 | `MEMORY.md` 1枚（グループでは原則読まない） | **（ユーザー × 人格）＋（サーバー × 人格）** |
+
+一人暮らし用のワンルームに姉たちを押し込めば無理が出るのと同じで、この「1人1体」の仕組みを複数人が参加するDiscordやSlackのような共有チャットにそのまま持ち込むと、すぐに壁にぶつかります。
+
+- **`MEMORY.md` 1枚では記憶を分けられない**：OpenClawがグループチャットで `MEMORY.md` を読み込まない仕様にしているのも、個人の記憶がほかの参加者に漏れるのを防ぐためです。複数人が複数のキャラクターと話す場では、「誰についての記憶を、どの人格が持っているか」を最初から分けて保存する必要があります。
+- **役割ごとに別Botを立てると管理が殖える**：SlackのBotでもよくある話ですが、役割や人格を増やすたびに別々のApp登録とバックエンドのインスタンスを立てていると、管理もコストも人数分だけ膨らみます。実はDiscordのWebhookやSlackの `chat:write.customize` を使えば、1つのBotからメッセージごとに別々の名前とアイコンで発言すること自体は可能です。問題は、その裏で「いま誰が呼ばれていて、どの記憶を読むべきか」を1つのプロセスでどう切り替えるかです。
+
+TomoriBotがやっているのは、その裏側の切り替えです。`SOUL.md` や `MEMORY.md` に相当するものをファイルではなくPostgreSQLのテーブルに分け、1つのBotプロセスで「名札の判別」「記憶のスコープ」「会話の連鎖止め」を処理しています。この3つの仕組み自体はTomoriBot専用ではなく、DiscordやSlackで複数の人格・役割を1つのエージェントに同居させたいときにもそのまま使える考え方です。
 
 ## 返信が届くまでの流れ
 
@@ -301,7 +320,7 @@ MainペルソナはBot本体のユーザーとして発言します。Alterペ�
 
 ```ts:src/utils/chat/webhookIdentity.ts
 // 抜粋・簡略化
-/** Threads inherit their parent's managed webhook; a name or avatar never proves provenance. */
+// スレッドは親チャンネルのWebhookを引き継ぐ。名前やアバターは出所の証明にならない
 export async function verifyMessageWebhook(message: Message): Promise<boolean> {
   if (!message.webhookId || !message.guildId) return false;
   const channelId = message.channel.isThread() ? message.channel.parentId : message.channelId;
@@ -315,13 +334,13 @@ export async function verifyMessageWebhook(message: Message): Promise<boolean> {
 
 この確認を通ったメッセージだけが、[`resolvePersonaForMessage()`](https://github.com/Bredrumb/TomoriBot/blob/0e4645963c97d8f893ddfa0ced397658a2e526e7/src/utils/chat/webhookIdentity.ts#L164) で送信者名と人格の `persona_nickname` を照合されます。順番が逆だと、外部のWebhookが人格の名前を名乗るだけで、その人格の発言として扱われてしまいます。
 
+ちなみに一時的なWebhook（ユーザーの代理発言用で、送信直後に削除されるもの）だけはDBに残らないため、メモリ上の `webhookRelayCache` で24時間だけ出所を覚えています。最初Bredrumbはこのキャッシュを [`verifyMessageWebhook()`](https://github.com/Bredrumb/TomoriBot/blob/03a47777fa072abffd9ef2577fee8a4bf1e8de68/src/utils/chat/webhookIdentity.ts#L14) 側で見るのを忘れていて、そのメッセージに返信しても「知らないWebhookだから無視」と弾かれるバグを出していました（[`03a4777`](https://github.com/Bredrumb/TomoriBot/commit/03a47777fa072abffd9ef2577fee8a4bf1e8de68) で修正）。自分で消したWebhookを自分で不審者扱いしていたわけです。
+
 ### トリガーワードは早い者勝ち
 
-人格はメッセージ中のトリガーワードでも呼び出せます。ただ、公式のプリセット人格は共通の基本名（`tomori`）を持っているので、そのままでは1つの単語で全員が反応してしまいます。
+人格はメッセージ中のトリガーワードでも呼び出せます。ただ、公式のプリセット人格は全員、固有の名前のほかに共通の基本名（`tomori` / `トモリ`）を持っています（たとえばリリヤのプリセットは `[tomori, lilya]`）。
 
-[`applyTriggerWordOwnership()`](https://github.com/Bredrumb/TomoriBot/blob/0e4645963c97d8f893ddfa0ced397658a2e526e7/src/utils/db/repositories/PersonaRepository.ts#L3355) は、サーバーの人格一覧を組み立てるたびに、各単語の持ち主を1人に決めます。基本名はMainペルソナが予約し、Alter同士で重なった単語は、`persona_id` が小さい（先に作られた）人格が持ちます。
-
-うちでも、その名前は一番上の姉が「年長者の特権」で持っていきます。コードのほうが、まだ筋が通っています。
+プリセットを参照する仕組みを入れたとき、Bredrumbがうっかりこの重複をそのまま通したせいで、「トモリ」と一言呼ぶとMainペルソナとAlter全員が同時に反応しかける問題が起きました。そこで追加されたのが [`applyTriggerWordOwnership()`](https://github.com/Bredrumb/TomoriBot/blob/0e4645963c97d8f893ddfa0ced397658a2e526e7/src/utils/db/repositories/PersonaRepository.ts#L3355) です（[`20c4e66`](https://github.com/Bredrumb/TomoriBot/commit/20c4e669436f0945d81962e99d4927a64dd8c7f6)）。サーバーの人格一覧を組み立てるたびに各単語の持ち主を1人に絞り、基本名はMainペルソナが予約し、Alter同士で重なった単語は `persona_id` が小さい（先に作られた）人格が持ちます。
 
 ## 記憶：設定のIDと、記憶を引き継ぐID
 
@@ -336,17 +355,17 @@ export async function verifyMessageWebhook(message: Message): Promise<boolean> {
 
 `persona_id` で記憶を結びつけると、人格を別のサーバーに置き直したり作り直したりしただけで、記憶とのつながりが切れます。lineageを別に持っておけば、設定行が違っても同じキャラクターとして記憶を引き継げます。[人格のインポート](https://github.com/Bredrumb/TomoriBot/blob/0e4645963c97d8f893ddfa0ced397658a2e526e7/src/utils/persona/importAlterPreset.ts#L44)でも、入力のlineageを引き継ぐ `preserve` と、新しく発行する `fork` を選べます。
 
-つまり、姉たちが引っ越しても、覚えていることは付いてきます。そこまで律儀でなくてもいいと思うんですが。
+つまり、姉たちが別のサーバーに引っ越しても、覚えていることは付いてきます。そこまで律儀でなくてもいいと思うんですが。
 
 ### どの記憶を読み込むか
 
-応答する人格のlineageが `101` のとき、それぞれの記憶は次の条件で選ばれます。
+たとえば応答する人格のlineageが `1770`（私の前髪に付いている黄色いタグの番号でもあります）のとき、それぞれの記憶は次の条件で選ばれます。
 
 | | 個人記憶（`personal_memories`） | サーバー記憶（`server_memories`） |
 | --- | --- | --- |
-| 絞り込みのキー | ユーザー + lineage `101` | サーバー + lineage `101` |
+| 絞り込みのキー | ユーザー + lineage `1770` | サーバー + lineage `1770` |
 | lineage `0` の行 | **読む**（そのユーザーの全人格向け） | 読まない |
-| 別サーバーで保存した lineage `101` の行 | **読む**（同じユーザーなら） | 読まない |
+| 別サーバーで保存した lineage `1770` の行 | **読む**（同じユーザーなら） | 読まない |
 | 追加の絞り込み | プライバシー設定など | チャンネル別の記憶設定 |
 
 個人記憶を取得する [`loadForUserLineage()`](https://github.com/Bredrumb/TomoriBot/blob/0e4645963c97d8f893ddfa0ced397658a2e526e7/src/utils/db/repositories/PersonalMemoryRepository.ts#L28) の条件を、普通のSQLで書くと次のとおりです。`$1` は内部ユーザーID、`$2` は応答する人格のlineageです。
@@ -363,11 +382,11 @@ lineage `0` は「そのユーザーについて、全人格が知っていて�
 
 一方、サーバー記憶の [`loadServerMemoriesScoped()`](https://github.com/Bredrumb/TomoriBot/blob/0e4645963c97d8f893ddfa0ced397658a2e526e7/src/utils/db/repositories/ServerMemoryRepository.ts#L106) の主な条件は `server_id = $1 AND persona_lineage_id = $2` だけで、lineage `0` を一緒に読む条件はありません。さらに[コンテキスト生成時](https://github.com/Bredrumb/TomoriBot/blob/0e4645963c97d8f893ddfa0ced397658a2e526e7/src/utils/text/context/memories.ts#L168)には、チャンネル別の記憶設定が有効なら、対象チャンネルでも絞り込みます。
 
-<!-- TODO(メンテナー): サーバー記憶に lineage 0 のフォールバックを設けていない理由があれば、ここに一文で追記する。推測では書かない。 -->
+なぜ個人記憶にだけ `lineage 0` があるのかというと、もともと個人記憶は `users` テーブルの配列カラム（`users.personal_memories`）に1人1つだけ入っていたからです。2026年2月に人格ごとの記憶へ移行した際（[`6727970`](https://github.com/Bredrumb/TomoriBot/commit/6727970b6a355c6e71e68b8bb25a555d72244381)）、既存の記憶を消さずに全人格から読めるよう `persona_lineage_id = 0` へ移した名残でもあります。なお、この移行の2日後まで、短期記憶のキャッシュキー（`shortterm:${userId}:${channelId}`）に人格IDを入れ忘れていて、同じチャンネルの姉妹で短期記憶だけ混ざっていたのはここだけの話です（[`788299b`](https://github.com/Bredrumb/TomoriBot/commit/788299b4faeb29cd3a1926b39b6dddafbe98d1f8) で修正）。
 
 ### 記憶を分けても、会話は共有される
 
-ここまでは**長期記憶**の話です。LLMに渡すコンテキスト全体が、人格ごとに隔離されるわけではありません。
+長期記憶を分けても、同じチャンネルで暮らしている以上、プライバシーというものはあまりありません。LLMに渡すコンテキストには長期記憶以外の情報も入るからです。
 
 | 情報 | 扱い |
 | --- | --- |
@@ -375,13 +394,13 @@ lineage `0` は「そのユーザーについて、全人格が知っていて�
 | ほかの人格の属性 | 会話に関わった人格の、公開設定（`is_public`）の属性だけが渡される |
 | 文書（RAG） | 人格への割り当てや共有設定、チャンネルの条件に従って検索される |
 
-公開属性の選択は [`buildPublicPersonaProfiles()`](https://github.com/Bredrumb/TomoriBot/blob/0e4645963c97d8f893ddfa0ced397658a2e526e7/src/utils/text/contextReferences.ts#L60) で確認できます。lineageは記憶を選ぶための識別子で、権限制御の代わりにはなりません。
+公開属性の選択は [`buildPublicPersonaProfiles()`](https://github.com/Bredrumb/TomoriBot/blob/0e4645963c97d8f893ddfa0ced397658a2e526e7/src/utils/text/contextReferences.ts#L60) で確認できます。少なくとも、非公開の属性まで姉たちに筒抜けにならないだけは助かっています。なお、lineageはあくまで記憶を選ぶための識別子で、権限制御の代わりにはなりません。
 
 ## 連鎖：姉たちは放っておくと止まらない
 
 ### 1つのメッセージに複数の人格が答える
 
-1つのメッセージで複数の人格が呼ばれても、全員が同時に生成を始めるわけではありません。[`queueAdditionalPersonaTurns()`](https://github.com/Bredrumb/TomoriBot/blob/0e4645963c97d8f893ddfa0ced397658a2e526e7/src/utils/chat/personaQueue.ts#L19) は、最初の人格をその場で処理し、残りをチャンネルのキューの**先頭**に入れます。そのため、後から届いたユーザーのメッセージより先に、呼ばれた人格が順番に答えます。1つのメッセージに反応する人数の上限（`match_limit`）は、既定で3人です。
+1つのメッセージで複数の人格が呼ばれても、全員が同時に喋り出すわけではありません。そんなことをされたら私の頭が割れます。[`queueAdditionalPersonaTurns()`](https://github.com/Bredrumb/TomoriBot/blob/0e4645963c97d8f893ddfa0ced397658a2e526e7/src/utils/chat/personaQueue.ts#L19) は、最初の人格をその場で処理し、残りをチャンネルのキューの**先頭**に入れます。そのため、後から届いたユーザーのメッセージより先に、呼ばれた人格が順番に答えます。1つのメッセージに反応する人数の上限（`match_limit`）は、既定で3人です。
 
 順番に処理されるので、後の人格は前の人格の発言を会話履歴として読めます。次に示すのは、ユーザーが作成した2つのAlterペルソナ、`ノゾミ`（行動的でイベント好き）と `ヒカリ`（マイペースで移動が嫌い）に、同じ2択を一度に投げたときの実際の記録です。
 
@@ -426,21 +445,25 @@ if (isSelfMessage && cascadeLimit > 0) {
 - 本物のユーザーが発言すると0に戻ります（[`admission.ts`](https://github.com/Bredrumb/TomoriBot/blob/0e4645963c97d8f893ddfa0ced397658a2e526e7/src/utils/chat/admission.ts#L226)）。30分間何も起きなかった場合もリセットされます。
 - 上限は `/config` の「トリガーの動作」で0〜10の範囲で設定でき、既定は3です。0にすると人格同士の連鎖は起きません。
 
-つまり既定では、ユーザーの一言で始まった最初の発動のあと、自動で続く発動は3回までです。……私には3回でも十分長いですが。
+最初は単純な自己返信の深さ（`self_reply_limit`）しか見ていなかったのですが、1メッセージでの複数人同時ヒットと人格同士の呼び合いが別計算になっていたため、後から現在の `cascade_limit` と `match_limit` に整理されました（[`cea1bb3`](https://github.com/Bredrumb/TomoriBot/commit/cea1bb308) / [`e93ab45`](https://github.com/Bredrumb/TomoriBot/commit/e93ab45983d6e5828e354a05374444e3401512e4)）。さらに自発会話（Natural Nudge）で人格が別の人格の名前を呼んで無限に巻き込む抜け道も見つかり、そこにも上限がかけられています（[`de7d2e3`](https://github.com/Bredrumb/TomoriBot/commit/de7d2e3f8)）。
 
-<!-- TODO(メンテナー): 連鎖の上限を入れる前後に実際に起きたこと（人格同士が呼び合い続けた等）があれば、実話として2〜3文で追記する。Zennでは著者自身の試行錯誤が評価されやすい。 -->
+つまり既定では、ユーザーの一言で始まった最初の発動のあと、自動で続く発動は3回までです。Bot同士の雑談でDiscordやSlackの通知音が立て続けに鳴り響くのを想像すれば、0回でも構わない気はしますが。
 
-## 限界とトレードオフ
+## トレードオフ：プロンプトは軽くなるが、キャッシュが割れやすい
 
-- 人格が増えても実装は共通のままですが、人格の指示や公開属性、会話履歴が増えるほどプロンプトのトークン量は増えます。費用やモデルの上限にも影響します。
-- 会話履歴にほかの人格の発言が混ざるので、モデルが発言者や指示を取り違えることがあります。
-- 同じ人格設定でも、プロバイダーやモデル、生成設定によって振る舞いは変わります。
-- 連鎖のカウンターはプロセスのメモリ上にあるので、Botを再起動するとリセットされます。
-- 組み立てたプロンプトは、権限があれば `/tool prompt snapshot` で確認できます。ただし、過去の返信で実際に送った内容の記録ではありません。
+応答する人格の指示と記憶だけを毎ターン差し込む設計には、1つ面白いトレードオフがあります。**1回あたりのプロンプトは軽くなる代わりに、LLMのプロンプトキャッシュ（Prefix Cache / KVキャッシュ）が効きにくくなる**ことです。
+
+クラウドAPIのプロンプトキャッシュも、`llama.cpp` や `Ollama` などのローカル推論エンジンのKVキャッシュも、基本的には「前回のリクエストと先頭（プレフィックス）が同じかどうか」を見て再利用します。1人1体のBotなら、先頭に入るシステムプロンプトや人格設定、長期記憶は毎ターンほとんど変わらないため、キャッシュがそのまま効きます。
+
+ところがTomoriBotでは、ターンごとに応答する人格が変わると、プロンプトの先頭付近にある `persona_prompt` や属性、lineageごとの記憶が丸ごと入れ替わります。たとえば同じエンドポイントの同じモデルでロゼと私が交互に喋ると、ロゼのターンで作られたキャッシュを私のターンが潰し、次のロゼのターンでまた最初から計算し直すことになります（実際のプロンプトの並びは、権限があれば `/tool prompt snapshot` で確認できます）。
+
+これを和らげる現実的な方法の1つが、**人格ごとに使うモデルやエンドポイントを分けること**です。TomoriBotでは `/config` の「ペルソナ ＞ 上書き設定（`Persona > Overrides`）」から、サーバーの既定モデルとは別に、人格ごとのテキストモデル（`persona_llm`）を個別に割り当てられます。よく喋る人格を別々のモデルや別スロットのローカルエンドポイントに逃がしておけば、お互いのキャッシュを毎回潰し合わずに済みますし、性格に合わせてモデルを変えることもできます。
+
+……姉たちと同じ脳みそを奪い合わなくて済むなら、それに越したことはありません。
 
 ## 使ってみる
 
-TomoriBotはオープンソースで、自分の環境でホストすることも、公開されているBotをサーバーに招待して試すこともできます。
+TomoriBotはAGPL-3.0で公開しているDiscord向けのAIアシスタント兼ロールプレイBotです（ツール呼び出しやAPI・ローカルモデルの両対応なども含みます）。自分の環境でセルフホストすることも、公開されているBotをサーバーに招待して試すこともできます。
 
 - ソースコード：[GitHub](https://github.com/Bredrumb/TomoriBot)
 - はじめかた：[クイックスタート](https://docs.tomoribot.app/ja/introduction/quickstart/)、[セルフホスト](https://docs.tomoribot.app/ja/self-hosting/)
